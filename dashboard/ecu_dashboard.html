@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard ECU</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10151c; --panel:#1a222d; --muted:#9cabbc; --accent:#47c9a5; --line:#293545; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:#edf3f8; font:15px system-ui, sans-serif; }
+    main { max-width:1100px; margin:32px auto; padding:0 20px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:22px; }
+    h1 { margin:0; font-size:26px; } #mode { color:var(--accent); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; }
+    .label { color:var(--muted); } .value { font-size:32px; font-weight:700; margin:10px 0; }
+    .unit { font-size:14px; color:var(--muted); font-weight:400; }
+    .bar { height:7px; border-radius:8px; background:#303b49; overflow:hidden; }
+    .bar span { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
+    h2 { font-size:17px; margin:0 0 14px; } .section { margin-top:18px; }
+    canvas { width:100%; height:210px; display:block; }
+    button { border:0; border-radius:7px; background:#287e70; color:white; padding:9px 13px; cursor:pointer; }
+    button:hover { background:#329985; } .faults { display:flex; gap:9px; flex-wrap:wrap; }
+    #dtc { list-style:none; margin:0; padding:0; max-height:180px; overflow:auto; }
+    #dtc li { padding:8px 0; border-top:1px solid var(--line); color:#d9e2eb; }
+    #tools { display:flex; align-items:center; gap:10px; } #file { max-width:220px; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><h1>Surveillance ECU</h1><div id="mode">Mode : démonstration</div></div>
+    <div id="tools"><button id="pause">Pause</button><input id="file" type="file" accept=".json,.csv"></div>
+  </header>
+  <section class="grid" aria-label="Mesures moteur">
+    <article class="card"><div class="label">Température moteur</div><div class="value"><span id="temp">—</span> <span class="unit">°C</span></div><div class="bar"><span id="tempBar"></span></div></article>
+    <article class="card"><div class="label">Régime moteur</div><div class="value"><span id="rpm">—</span> <span class="unit">tr/min</span></div><div class="bar"><span id="rpmBar"></span></div></article>
+    <article class="card"><div class="label">Vitesse</div><div class="value"><span id="speed">—</span> <span class="unit">km/h</span></div><div class="bar"><span id="speedBar"></span></div></article>
+    <article class="card"><div class="label">Pression d'huile</div><div class="value"><span id="oil">—</span> <span class="unit">bar</span></div><div class="bar"><span id="oilBar"></span></div></article>
+    <article class="card"><div class="label">Batterie</div><div class="value"><span id="batt">—</span> <span class="unit">V</span></div><div class="bar"><span id="battBar"></span></div></article>
+  </section>
+  <section class="card section"><h2>Évolution des mesures</h2><canvas id="chart" width="1000" height="210"></canvas></section>
+  <section class="card section"><h2>Simulation de panne</h2><div class="faults">
+    <button data-f="temp">Déclencher panne température</button><button data-f="oil">Déclencher panne huile</button><button data-f="batt">Déclencher panne batterie</button>
+  </div></section>
+  <section class="card section"><h2>Journal des DTC</h2><ul id="dtc"><li class="muted">Aucun défaut signalé.</li></ul></section>
+</main>
+<script>
+  const historique = [];
+  let tempsReel = false;
+  let enPause = false;
+  let indexDemo = 0;
+  const dtcActifs = new Map();
+
+  // Met à jour les indicateurs, la courbe et le journal des défauts.
+  function push(d) {
+    if (enPause) return;
+    for (const nom of ['temp', 'rpm', 'speed', 'oil', 'batt']) {
+      const el = document.getElementById(nom);
+      if (d[nom] !== undefined) el.textContent = d[nom];
+      const limites = { temp:120, rpm:7000, speed:240, oil:6, batt:16 };
+      const valeur = Number(d[nom]);
+      if (Number.isFinite(valeur)) document.getElementById(nom + 'Bar').style.width = Math.max(0, Math.min(100, valeur / limites[nom] * 100)) + '%';
+    }
+    historique.push(d);
+    if (historique.length > 50) historique.shift();
+    dessinerCourbe();
+    const etats = [
+      ['temp', 'P0217', 'Surchauffe moteur', Number(d.temp) > 105],
+      ['rpm', 'P0219', 'Sur-régime moteur', Number(d.rpm) > 6000],
+      ['oil', 'P0524', 'Pression d’huile basse', Number(d.oil) < 1.5],
+      ['batt', 'P0562', 'Tension batterie basse', Number(d.batt) < 11.8]
+    ];
+    for (const [cle, code, nom, actif] of etats) {
+      if (actif && !dtcActifs.get(cle)) ajouterDtc(`[DTC ${code}] ${nom} : APPARU`);
+      if (!actif && dtcActifs.get(cle)) ajouterDtc(`[DTC ${code}] ${nom} : RESOLU`);
+      dtcActifs.set(cle, actif);
+    }
+  }
+
+  function ajouterDtc(texte) {
+    const liste = document.getElementById('dtc');
+    if (liste.firstElementChild && liste.firstElementChild.classList.contains('muted')) liste.replaceChildren();
+    const derniere = liste.lastElementChild;
+    if (derniere && derniere.textContent === texte) return;
+    const li = document.createElement('li'); li.textContent = `${new Date().toLocaleTimeString()} — ${texte}`;
+    liste.prepend(li);
+    while (liste.children.length > 100) liste.lastElementChild.remove();
+  }
+
+  function dessinerCourbe() {
+    const canvas = document.getElementById('chart'); const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height; ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#293545'; ctx.lineWidth = 1;
+    for (let i = 1; i < 5; i++) { ctx.beginPath(); ctx.moveTo(0, h*i/5); ctx.lineTo(w, h*i/5); ctx.stroke(); }
+    const series = [['temp', '#ffad5c', 120], ['rpm', '#55b8ff', 7000], ['oil', '#47c9a5', 6]];
+    for (const [nom, couleur, max] of series) {
+      ctx.beginPath(); ctx.strokeStyle = couleur; ctx.lineWidth = 2;
+      historique.forEach((d, i) => { const x = i * w / Math.max(1, historique.length - 1); const y = h - Number(d[nom] || 0) / max * h;
+        if (i === 0) ctx.moveTo(x,y); else ctx.lineTo(x,y); }); ctx.stroke();
+    }
+  }
+
+  document.getElementById('pause').addEventListener('click', (e) => { enPause = !enPause; e.target.textContent = enPause ? 'Reprendre' : 'Pause'; });
+  document.querySelectorAll('[data-f]').forEach((bouton) => bouton.addEventListener('click', async () => {
+    if (tempsReel) {
+      try { const reponse = await fetch('/fault/' + bouton.dataset.f, { method:'POST' }); if (!reponse.ok) throw new Error(); }
+      catch { ajouterDtc('Impossible d’envoyer la commande de panne.'); }
+    } else ajouterDtc(`Mode démonstration : panne ${bouton.dataset.f} simulée.`);
+  }));
+
+  // Charge un JSON (tableau de mesures) ou un CSV simple en mode démonstration.
+  document.getElementById('file').addEventListener('change', async (e) => {
+    if (tempsReel || !e.target.files[0]) return;
+    try {
+      const contenu = await e.target.files[0].text(); let lignes;
+      if (e.target.files[0].name.endsWith('.json')) lignes = JSON.parse(contenu);
+      else { const [entete, ...reste] = contenu.trim().split(/\r?\n/); const colonnes = entete.split(','); lignes = reste.map(l => Object.fromEntries(l.split(',').map((v,i) => [colonnes[i], Number(v)]))); }
+      (Array.isArray(lignes) ? lignes : [lignes]).forEach(push);
+    } catch { ajouterDtc('Fichier invalide : import impossible.'); }
+  });
+
+  async function demarrer() {
+    try {
+      const ping = await fetch('/api/ping');
+      if (!ping.ok) throw new Error('serveur absent');
+      tempsReel = true;
+      document.getElementById('mode').textContent = 'Mode : temps réel (Zephyr)';
+      document.getElementById('pause').hidden = true;
+      document.getElementById('file').hidden = true;
+      document.querySelectorAll('[data-f]').forEach(b => { b.textContent = 'Déclencher panne ' + ({temp:'température',oil:'huile',batt:'batterie'}[b.dataset.f]); });
+      const flux = new EventSource('/events');
+      flux.onmessage = (event) => { try { push(JSON.parse(event.data)); } catch {} };
+      flux.onerror = () => { document.getElementById('mode').textContent = 'Connexion perdue, nouvelle tentative…'; };
+      flux.onopen = () => { document.getElementById('mode').textContent = 'Mode : temps réel (Zephyr)'; };
+    } catch {
+      // En fichier://, le ping échoue : on conserve les commandes de démonstration.
+      document.getElementById('mode').textContent = 'Mode : démonstration';
+      setInterval(() => {
+        indexDemo++;
+        push({ t:indexDemo*500, temp:Math.round(88 + 8*Math.sin(indexDemo/8)), rpm:Math.round(1900 + 500*Math.sin(indexDemo/6)), speed:Math.round(55 + 20*Math.sin(indexDemo/7)), oil:Number((2.8 + .3*Math.sin(indexDemo/9)).toFixed(1)), batt:Number((13.7 + .2*Math.sin(indexDemo/10)).toFixed(1)) });
+      }, 500);
+    }
+  }
+  demarrer();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+node_modules/
+build/
+*.log
+debug.log
+.env
+__pycache__/
+*.pyc
+*.o
+*.elf
+*.hex
+*.bin
+*.map

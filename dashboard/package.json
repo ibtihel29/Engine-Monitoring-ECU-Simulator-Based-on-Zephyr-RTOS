@@ -1,0 +1,9 @@
+{
+  "name": "ecu-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dashboard temps réel pour le simulateur ECU Zephyr",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
